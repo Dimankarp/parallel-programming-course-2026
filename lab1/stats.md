@@ -1,0 +1,1 @@
+Single thread (baseline): 226379⏎ ops/ms 224506 

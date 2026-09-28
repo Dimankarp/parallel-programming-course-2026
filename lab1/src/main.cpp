@@ -1,8 +1,10 @@
 #include "basic.h"
+#include "double_buffer.h"
 #include "gen.h"
 #include "metric.h"
 #include "naive.h"
 #include "shard.h"
+#include "thread_local.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -33,7 +35,7 @@ double run(parallel::MetricsCollector &collector,
       uint64_t start = i * 1000;
       ready_latch.count_down();
       start_latch.wait();
-      while (!stop.load(std::memory_order_relaxed)) {
+      while (!stop) {
         collector.record(delays[start++]);
         local_count++;
         if (start == delays.size())
@@ -73,8 +75,69 @@ double measurePoint(parallel::MetricsCollector &collector,
   return *median;
 }
 
+struct StressTestResult {
+  uint64_t over_expected{0};
+  uint64_t under_expected{0};
+  uint64_t tries{0};
+  uint64_t total_ops{0};
+  uint64_t final_count{0};
+};
+
+StressTestResult stressTest(parallel::MetricsCollector &collector,
+                            const std::vector<uint32_t> &delays,
+                            size_t threads_num) {
+
+  std::latch ready_latch{static_cast<ssize_t>(threads_num)};
+  std::latch start_latch{1};
+
+  std::atomic_bool stop{false};
+  std::vector<std::thread> threads{};
+  std::vector<uint64_t> ops(threads_num, 0);
+
+  for (size_t i = 0; i < threads_num; i++) {
+    threads.push_back(std::thread{[&, i]() {
+      uint64_t local_count = 0;
+      uint64_t start = i * 1000;
+      ready_latch.count_down();
+      start_latch.wait();
+      while (!stop.load(std::memory_order_relaxed)) {
+        collector.record(delays[start++]);
+        local_count++;
+        if (start == delays.size())
+          start = 0;
+      }
+      ops[i] = local_count;
+    }});
+  }
+
+  ready_latch.wait();
+  start_latch.count_down();
+
+  parallel::Snapshot s;
+  StressTestResult res{};
+  for (size_t i = 0; i < 10'000; i++) {
+    s = collector.snapshot();
+    auto sum = std::accumulate(s.buckets.begin(), s.buckets.end(), uint64_t{0});
+    if (sum > s.count) {
+      res.under_expected++;
+    } else if (sum < s.count) {
+      res.over_expected++;
+    }
+    res.tries++;
+  }
+
+  stop = true;
+  for (auto &t : threads) {
+    t.join();
+  }
+
+  res.total_ops = std::accumulate(ops.begin(), ops.end(), uint64_t{0});
+  res.final_count = collector.snapshot().count;
+  return res;
+}
+
 void printUsage(const char *prog) {
-  std::cerr << "Usage: " << prog << " <test_number> [-n <threads>]\n";
+  std::cerr << "Usage: " << prog << " <test_number> [-n <threads>] [-s]\n";
 }
 
 int main(int argc, char *argv[]) {
@@ -98,6 +161,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  bool stress_mode = false;
   size_t threads_num = (test_id == 1) ? 1 : 4;
 
   for (int i = 2; i < argc; ++i) {
@@ -119,6 +183,8 @@ int main(int argc, char *argv[]) {
         std::cerr << "Error: -n requires a thread count argument.\n";
         return 1;
       }
+    } else if (arg == "-s" || arg == "--stress") {
+      stress_mode = true;
     } else {
       std::cerr << "Error: Unrecognized option: " << arg << "\n";
       printUsage(argv[0]);
@@ -136,8 +202,6 @@ int main(int argc, char *argv[]) {
     delays[i] = zipf(rng);
   }
 
-  std::cout << "Running Benchmark " << test_id
-            << " with threds: " << threads_num << "\n";
   std::unique_ptr<parallel::MetricsCollector> collector_ptr;
   switch (test_id) {
   case 1:
@@ -152,7 +216,30 @@ int main(int argc, char *argv[]) {
   case 4:
     collector_ptr.reset(new parallel::ShardCollector());
     break;
+  case 5:
+    collector_ptr.reset(new parallel::ThreadLocalCollector());
+    break;
+  case 6:
+    collector_ptr.reset(new parallel::DoubleBufferCollector());
+    break;
   }
+
+  if (stress_mode) {
+    std::cout << "Running Stress Test " << test_id
+              << " with threads: " << threads_num << "\n";
+    StressTestResult res = stressTest(*collector_ptr, delays, threads_num);
+    uint64_t inconsistent = res.over_expected + res.under_expected;
+    double broken_pct = (res.tries > 0) ? (100.0 * inconsistent / res.tries) : 0.0;
+    std::cout << "Snapshots taken: " << res.tries << "\n";
+    std::cout << "Inconsistent snapshots: " << inconsistent << " (" << broken_pct << "%)\n";
+    std::cout << "  - sum(buckets) < count: " << res.over_expected << "\n";
+    std::cout << "  - sum(buckets) > count: " << res.under_expected << "\n";
+    std::cout << "Total worker ops: " << res.total_ops << ", Final count: " << res.final_count << "\n";
+    return 0;
+  }
+
+  std::cout << "Running Benchmark " << test_id
+            << " with threds: " << threads_num << "\n";
   double res = measurePoint(*collector_ptr, delays, threads_num);
   std::cout << "Result is: " << res << " ops/ms\n";
   return 0;

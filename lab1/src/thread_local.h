@@ -2,6 +2,7 @@
 #define PARALLEL_THREAD_LOCAL_H
 
 #include "metric.h"
+#include "util.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -20,14 +21,6 @@ struct alignas(64) ThreadState {
   std::atomic<uint64_t> min{UINT64_MAX};
   std::atomic<uint64_t> max{0};
 };
-
-#ifndef PARALLEL_NEXT_COLLECTOR_ID_DEFINED
-#define PARALLEL_NEXT_COLLECTOR_ID_DEFINED
-inline uint64_t next_collector_id() {
-  static std::atomic<uint64_t> counter{1};
-  return counter.fetch_add(1, std::memory_order_relaxed);
-}
-#endif
 
 inline void relaxed_add(std::atomic<uint64_t> &c, uint64_t delta) {
   c.store(c.load(std::memory_order_relaxed) + delta, std::memory_order_relaxed);
@@ -105,7 +98,7 @@ private:
     return slot.state;
   }
 
-  const uint64_t id_{next_collector_id()};
+  const uint64_t id_{nextCollectorId()};
   mutable std::mutex list_lock_;
   std::vector<std::unique_ptr<ThreadState>> all_states_;
 };

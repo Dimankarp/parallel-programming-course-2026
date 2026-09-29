@@ -6,60 +6,54 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
+#include "util.h"
 
 namespace parallel {
 
-#ifndef PARALLEL_NEXT_COLLECTOR_ID_DEFINED
-#define PARALLEL_NEXT_COLLECTOR_ID_DEFINED
-inline uint64_t next_collector_id() {
-  static std::atomic<uint64_t> counter{1};
-  return counter.fetch_add(1, std::memory_order_relaxed);
-}
-#endif
-
 enum class BufferState : int {
-  Nowhere = -1,
-  Buffer0 = 0,
-  Buffer1 = 1,
+  NO = -1,
+  ZERO = 0,
+  ONE = 1,
 };
 
 struct Buf {
   std::array<uint64_t, BUCKETS_NUM> buckets{};
   uint64_t count = 0;
   uint64_t sum = 0;
-  uint64_t min = UINT64_MAX;
+  uint64_t min = std::numeric_limits<uint64_t>::max();
   uint64_t max = 0;
 
   void clear() {
     buckets.fill(0);
     count = 0;
     sum = 0;
-    min = UINT64_MAX;
+    min = std::numeric_limits<uint64_t>::max();
     max = 0;
   }
 };
 
 struct alignas(64) ThreadBuffers {
-  std::atomic<BufferState> inside{BufferState::Nowhere};
+  std::atomic<BufferState> inside{BufferState::NO};
   Buf buf[2];
 };
 
 class DoubleBufferCollector : public MetricsCollector {
 public:
   void record(uint64_t value) override {
-    ThreadBuffers *my = get_my_buffers();
+    ThreadBuffers *my = getBuffers();
     BufferState b;
     while (true) {
-      b = active_.load(std::memory_order_seq_cst);
+      b = _active.load(std::memory_order_seq_cst);
       my->inside.store(b, std::memory_order_seq_cst);
-      if (active_.load(std::memory_order_seq_cst) == b) {
+      if (_active.load(std::memory_order_seq_cst) == b) {
         break;
       }
-      my->inside.store(BufferState::Nowhere, std::memory_order_seq_cst);
+      my->inside.store(BufferState::NO, std::memory_order_seq_cst);
     }
 
     size_t idx = static_cast<size_t>(b);
@@ -70,71 +64,72 @@ public:
     my->buf[idx].min = std::min(my->buf[idx].min, value);
     my->buf[idx].max = std::max(my->buf[idx].max, value);
 
-    my->inside.store(BufferState::Nowhere, std::memory_order_release);
+    my->inside.store(BufferState::NO, std::memory_order_release);
   }
 
   Snapshot snapshot() const override {
-    std::lock_guard<std::mutex> lock{snap_lock_};
+    std::lock_guard<std::mutex> lock{_lock};
 
-    BufferState old = active_.load(std::memory_order_seq_cst);
-    BufferState next = (old == BufferState::Buffer0) ? BufferState::Buffer1 : BufferState::Buffer0;
-    active_.store(next, std::memory_order_seq_cst);
+    BufferState old = _active.load(std::memory_order_seq_cst);
+    BufferState next = (old == BufferState::ZERO) ? BufferState::ONE
+                                                     : BufferState::ZERO;
+    _active.store(next, std::memory_order_seq_cst);
 
-    for (const auto &tb : all_threads_) {
+    for (const auto &tb : _threads) {
       while (tb->inside.load(std::memory_order_seq_cst) == old) {
         std::this_thread::yield();
       }
     }
 
     size_t old_idx = static_cast<size_t>(old);
-    for (const auto &tb : all_threads_) {
+    for (const auto &tb : _threads) {
       if (tb->buf[old_idx].count > 0) {
         for (size_t i = 0; i < BUCKETS_NUM; i++) {
-          global_.buckets[i] += tb->buf[old_idx].buckets[i];
+          _global.buckets[i] += tb->buf[old_idx].buckets[i];
         }
-        global_.count += tb->buf[old_idx].count;
-        global_.sum += tb->buf[old_idx].sum;
-        global_.min = std::min(global_.min, tb->buf[old_idx].min);
-        global_.max = std::max(global_.max, tb->buf[old_idx].max);
+        _global.count += tb->buf[old_idx].count;
+        _global.sum += tb->buf[old_idx].sum;
+        _global.min = std::min(_global.min, tb->buf[old_idx].min);
+        _global.max = std::max(_global.max, tb->buf[old_idx].max);
       }
       tb->buf[old_idx].clear();
     }
 
     Snapshot s{};
-    s.buckets = global_.buckets;
-    s.count = global_.count;
-    s.sum = global_.sum;
-    s.min = (global_.count > 0) ? global_.min : 0;
-    s.max = global_.max;
+    s.buckets = _global.buckets;
+    s.count = _global.count;
+    s.sum = _global.sum;
+    s.min = (_global.count > 0) ? _global.min : 0;
+    s.max = _global.max;
     calcPercentiles(s);
     return s;
   }
 
 private:
-  ThreadBuffers *get_my_buffers() {
+  ThreadBuffers *getBuffers() {
     struct TLSSlot {
       uint64_t id = 0;
       ThreadBuffers *buffers = nullptr;
     };
     static thread_local TLSSlot slot;
-    if (slot.id != id_) {
+    if (slot.id != _id) {
       auto tb = std::make_unique<ThreadBuffers>();
       ThreadBuffers *raw = tb.get();
       {
-        std::lock_guard<std::mutex> lock{snap_lock_};
-        all_threads_.push_back(std::move(tb));
+        std::lock_guard<std::mutex> lock{_lock};
+        _threads.push_back(std::move(tb));
       }
-      slot.id = id_;
+      slot.id = _id;
       slot.buffers = raw;
     }
     return slot.buffers;
   }
 
-  const uint64_t id_{next_collector_id()};
-  mutable std::atomic<BufferState> active_{BufferState::Buffer0};
-  mutable std::mutex snap_lock_;
-  std::vector<std::unique_ptr<ThreadBuffers>> all_threads_;
-  mutable Buf global_{};
+  const uint64_t _id{nextCollectorId()};
+  mutable std::atomic<BufferState> _active{BufferState::ZERO};
+  mutable std::mutex _lock;
+  std::vector<std::unique_ptr<ThreadBuffers>> _threads;
+  mutable Buf _global{};
 };
 
 } // namespace parallel

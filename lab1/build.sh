@@ -4,6 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+BEAR="bear --append -- "
 CXX=${CXX:-g++}
 CXXFLAGS="-O2 -std=c++20 -pthread"
 OUTPUT="bench"
@@ -17,5 +18,5 @@ else
     echo "Building benchmark: $OUTPUT..."
 fi
 
-$CXX $CXXFLAGS src/*.cpp -o "$OUTPUT"
+$BEAR $CXX $CXXFLAGS src/*.cpp -o "$OUTPUT"
 echo "Build successful: $OUTPUT"

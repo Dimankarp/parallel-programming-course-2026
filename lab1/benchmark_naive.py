@@ -31,9 +31,12 @@ def main():
     if not bench_bin.exists():
         subprocess.run([str(root / "build.sh")], cwd=root, check=True)
 
-    threads = [1, 2, 4, 8, 16]
+    threads = [1, 2, 4, 6, 12]
     naive = run_benchmark(bench_bin, root, 2, "NaiveCollector", threads)
     empty = run_benchmark(bench_bin, root, 3, "NaiveEmptyCollector", threads)
+    shard = run_benchmark(bench_bin, root, 4, "ShardCollector", threads)
+    threadlocal = run_benchmark(bench_bin, root, 5, "ThreadLocalCollector", threads)
+    dbuf = run_benchmark(bench_bin, root, 6, "DoubleBufferCollector", threads)
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -47,6 +50,27 @@ def main():
         y=[val for _, val in empty],
         mode="lines+markers",
         name="NaiveEmptyCollector",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[t for t, _ in shard],
+        y=[val for _, val in shard],
+        mode="lines+markers",
+        name="ShardCollector",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[t for t, _ in threadlocal],
+        y=[val for _, val in threadlocal],
+        mode="lines+markers",
+        name="ThreadLocalCollector",
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=[t for t, _ in dbuf],
+        y=[val for _, val in dbuf],
+        mode="lines+markers",
+        name="DoubleBufferCollector",
     ))
 
     fig.update_layout(

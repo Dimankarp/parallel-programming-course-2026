@@ -3,3 +3,4 @@ compile_commands.json
 bench
 bench_tsan
 *.html
+!*_final.html

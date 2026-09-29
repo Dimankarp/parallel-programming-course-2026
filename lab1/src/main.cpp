@@ -7,6 +7,7 @@
 #include "thread_local.h"
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -222,6 +223,8 @@ int main(int argc, char *argv[]) {
   case 6:
     collector_ptr.reset(new parallel::DoubleBufferCollector());
     break;
+  default:
+    assert(false);
   }
 
   if (stress_mode) {
@@ -229,12 +232,15 @@ int main(int argc, char *argv[]) {
               << " with threads: " << threads_num << "\n";
     StressTestResult res = stressTest(*collector_ptr, delays, threads_num);
     uint64_t inconsistent = res.over_expected + res.under_expected;
-    double broken_pct = (res.tries > 0) ? (100.0 * inconsistent / res.tries) : 0.0;
+    double broken_pct =
+        (res.tries > 0) ? (100.0 * inconsistent / res.tries) : 0.0;
     std::cout << "Snapshots taken: " << res.tries << "\n";
-    std::cout << "Inconsistent snapshots: " << inconsistent << " (" << broken_pct << "%)\n";
+    std::cout << "Inconsistent snapshots: " << inconsistent << " ("
+              << broken_pct << "%)\n";
     std::cout << "  - sum(buckets) < count: " << res.over_expected << "\n";
     std::cout << "  - sum(buckets) > count: " << res.under_expected << "\n";
-    std::cout << "Total worker ops: " << res.total_ops << ", Final count: " << res.final_count << "\n";
+    std::cout << "Total worker ops: " << res.total_ops
+              << ", Final count: " << res.final_count << "\n";
     return 0;
   }
 
